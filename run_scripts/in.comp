@@ -1,0 +1,122 @@
+# Variable Definitions
+variable temperature equal 298
+
+if "${DENSITY} == 2.0" then &
+  "variable botatoms equal 46620" &
+elif "${DENSITY} == 3.0" &
+  "variable botatoms equal 59895" &
+elif "${DENSITY} == 4.0" &
+  "variable botatoms equal 73170" &
+else "${DENSITY} == 5.0" &
+  "variable botatoms equal 86445"
+
+# Initialization
+units		real
+boundary	p p f
+atom_style 	full
+
+# Force field info
+pair_style      lj/cut/coul/long 11.0
+angle_style     harmonic
+dihedral_style  opls
+
+read_data   ${NAME}-equil.lammps
+
+bond_style  hybrid harmonic morse
+bond_coeff  1   morse   147.13 1.61 1.65 # Si-O, interfacial
+bond_coeff  2   harmonic    553.0 0.945 # O-H
+bond_coeff  3   harmonic    300.0 1.630 # Si-O
+bond_coeff  4   harmonic    340.0 1.090 # C-H
+bond_coeff  5   harmonic    268.0 1.529 # C-C
+bond_coeff  6   harmonic    200.0 1.850 # Si-C
+
+special_bonds lj/coul 0.0 0.0 0.5
+pair_modify shift yes mix geometric
+
+kspace_style pppm 1.0e-4
+kspace_modify slab 3.0
+
+# Group definitions
+group silica type 6 7 8 11 12 13 14 15 16
+
+group bottom id <= ${botatoms}
+group bottomsilica intersect bottom silica
+
+group asperity subtract all bottom
+group asperitysilica intersect asperity silica
+
+variable subbottom equal bound(all,zmin)
+variable subfixmax equal ${subbottom}+4.0
+region subfixed block INF INF INF INF INF ${subfixmax}
+group subfixed region subfixed
+
+variable tiptop equal bound(asperitysilica,zmax)
+variable topfixmax equal ${tiptop}-4.0
+region topfixed block INF INF INF INF ${topfixmax} INF
+group topfixed region topfixed
+group asperityfixed intersect topfixed asperitysilica
+
+group fixed union subfixed asperityfixed
+group mobile subtract all fixed
+
+# Define neighborlist parameters
+neighbor        4.0 bin
+neigh_modify    every 2 delay 0
+neigh_modify    exclude group asperityfixed asperityfixed
+neigh_modify    exclude group subfixed subfixed
+
+# Define parameters for RESPA multi-timestep integrator
+run_style respa 3 2 2 bond 1 angle 2 dihedral 2 pair 3 kspace 3
+
+# NVT integration with Nose-Hoover thermostat
+fix integrator	mobile nvt temp ${temperature} ${temperature} 100
+
+# Fix OH bonds with SHAKE
+fix suboh all shake 0.0001 20 100 b 2
+
+timestep 1.0
+thermo 1000
+thermo_style custom step temp pe ke epair evdwl ecoul ebond eangle edihed
+
+dump traj	all dcd 1000 ${NAME}-comp.dcd
+dump_modify traj unwrap yes
+
+# Compress the tip towards the monolayer at 10m/s
+fix comp asperityfixed move linear 0.0 0.0 -1e-4 units box
+
+# Write out normal forces on various parts of the system
+compute 1 asperity property/atom fz
+compute 2 asperityfixed property/atom fz
+compute 3 asperitysilica property/atom fz
+compute 4 asperity reduce sum c_1
+compute 5 asperityfixed reduce sum c_2
+compute 6 asperitysilica reduce sum c_3
+compute 7 bottom property/atom fz
+compute 8 subfixed property/atom fz
+compute 9 bottomsilica property/atom fz
+compute 10 bottom reduce sum c_7
+compute 11 subfixed reduce sum c_8
+compute 12 bottomsilica reduce sum c_9
+# The 0.0695 factor converts to nN
+variable asperityfz equal c_4*0.0695
+variable asperityfixedfz equal c_5*0.0695
+variable asperitysilicafz equal c_6*0.0695
+variable bottomfz equal c_10*0.0695
+variable subfixedfz equal c_11*0.0695
+variable bottomsilicafz equal c_12*0.0695
+
+fix fz_asperity asperity ave/time 500 1 500 v_asperityfz file ${NAME}-fz-asperity.txt
+fix fz_asperityfixed asperityfixed ave/time 500 1 500 v_asperityfixedfz file ${NAME}-fz-asperityfixed.txt
+fix fz_asperitysilica asperitysilica ave/time 500 1 500 v_asperitysilicafz file ${NAME}-fz-asperitysilica.txt
+fix fz_bottom bottom ave/time 500 1 500 v_bottomfz file ${NAME}-fz-bottom.txt
+fix fz_subfixed subfixed ave/time 500 1 500 v_subfixedfz file ${NAME}-fz-subfixed.txt
+fix fz_bottomsilica bottomsilica ave/time 500 1 500 v_bottomsilicafz file ${NAME}-fz-bottomsilica.txt
+
+# Run for 10ps, check the force on the tip, if >0.5nN, write a restart file
+variable a loop 500
+label loop
+run 10000
+if "${asperityfz} > 0.5" then &
+  "write_restart restart.${NAME}.${asperityfz}nN.comp"
+next a
+jump in.comp loop

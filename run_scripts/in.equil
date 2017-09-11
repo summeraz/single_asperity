@@ -1,0 +1,126 @@
+# Variable Definitions
+variable temperature equal 298
+variable SEED equal 12345
+
+if "${DENSITY} == 2.0" then &
+  "variable botatoms equal 46620" &
+elif "${DENSITY} == 3.0" &
+  "variable botatoms equal 59895" &
+elif "${DENSITY} == 4.0" &
+  "variable botatoms equal 73170" &
+else "${DENSITY} == 5.0" &
+  "variable botatoms equal 86445"
+
+# Initialization
+units		real
+boundary	p p f
+atom_style 	full
+
+# Force field info
+pair_style      lj/cut/coul/long 11.0
+angle_style     harmonic
+dihedral_style  opls
+
+read_data   ${NAME}.lammps
+
+bond_style  harmonic
+bond_coeff  1   300.0 1.630 # Si-O, interfacial
+bond_coeff  2   553.0 0.945 # O-H
+bond_coeff  3   300.0 1.630 # Si-O
+bond_coeff  4   340.0 1.090 # C-H
+bond_coeff  5   268.0 1.529 # C-C
+bond_coeff  6   200.0 1.850 # Si-C
+
+special_bonds lj/coul 0.0 0.0 0.5
+pair_modify shift yes mix geometric
+
+kspace_style pppm 1.0e-4
+kspace_modify slab 3.0
+
+# Group definitions
+group silica type 6 7 8 11 12 13 14 15 16
+
+group bottom id <= ${botatoms}
+group bottomsilica intersect bottom silica
+
+group asperity subtract all bottom
+group asperitysilica intersect asperity silica
+
+variable subbottom equal bound(all,zmin)
+variable subfixmax equal ${subbottom}+4.0 # Freeze bottom 4 angstroms
+region subfixed block INF INF INF INF INF ${subfixmax}
+group subfixed region subfixed
+
+variable tiptop equal bound(all,zmax)
+variable topfixmax equal ${tiptop}-4.0 # Freeze top 4 angstroms
+region topfixed block INF INF INF INF ${topfixmax} INF
+group topfixed region topfixed
+group asperityfixed intersect topfixed asperitysilica
+
+group fixed union subfixed asperityfixed
+group mobile subtract all fixed
+
+# Initialize velocities
+velocity        all create ${temperature} ${SEED} dist gaussian
+
+# Define neighborlist parameters
+neighbor        4.0 bin
+neigh_modify    every 2 delay 0
+neigh_modify    exclude group asperityfixed asperityfixed
+neigh_modify    exclude group subfixed subfixed
+
+# Define parameters for RESPA multi-timestep integrator
+run_style respa 3 2 2 bond 1 angle 2 dihedral 2 pair 3 kspace 3
+
+# Brief energy minimization to push the system out of a highly
+# unfavorable initial state
+minimize 1.0e-4 1.0e-6 100 1000
+thermo 1
+thermo_style custom step fmax
+
+# NVT integration with Nose-Hoover thermostat
+fix integrator	mobile nvt temp ${temperature} ${temperature} 100
+
+dump traj	all dcd 500 ${NAME}-min.dcd
+dump_modify traj unwrap yes
+
+# Fix OH bonds with SHAKE
+fix suboh all shake 0.0001 20 100 b 2
+
+# Continue minimization by running for a short time at a small timestep
+timestep 0.01
+thermo 10
+thermo_style custom step temp pe ke epair evdwl ecoul ebond eangle edihed
+run 25000
+
+timestep 0.1
+thermo 10
+run 25000
+
+undump traj
+
+# Now equilibrate for 1ns using a 1fs timestep
+timestep 1.0
+thermo 100
+
+dump traj	all dcd 1000 ${NAME}-equil.dcd
+dump_modify traj unwrap yes
+
+restart 250000 restart.${NAME}.*.equil
+
+run 500000
+
+# We replace the interfacial bonds with a Morse bond, this has negligible
+# effect on properties for this study, but could be useful in the future
+# for looking at wear.
+bond_style  hybrid harmonic morse
+bond_coeff  1   morse   147.13 1.61 1.65 # Si-O, interfacial
+bond_coeff  2   harmonic    553.0 0.945 # O-H
+bond_coeff  3   harmonic    300.0 1.630 # Si-O
+bond_coeff  4   harmonic    340.0 1.090 # C-H
+bond_coeff  5   harmonic    268.0 1.529 # C-C
+bond_coeff  6   harmonic    200.0 1.850 # Si-C
+
+run 500000
+
+write_data  ${NAME}-equil.lammps

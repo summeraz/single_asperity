@@ -1,0 +1,147 @@
+# Variable Definitions
+variable temperature equal 298
+
+if "${DENSITY} == 2.0" then &
+  "variable botatoms equal 46620" &
+elif "${DENSITY} == 3.0" &
+  "variable botatoms equal 59895" &
+elif "${DENSITY} == 4.0" &
+  "variable botatoms equal 73170" &
+else "${DENSITY} == 5.0" &
+  "variable botatoms equal 86445"
+
+# Initialization
+units		real
+boundary	p p f
+atom_style 	full
+
+# Force field info
+pair_style      lj/cut/coul/long 11.0
+angle_style     harmonic
+dihedral_style  opls
+
+read_data   ${NAME}-${LOAD}nN.lammps
+
+bond_style  hybrid harmonic morse
+bond_coeff  1   morse   147.13 1.61 1.65 # Si-O, interfacial
+bond_coeff  2   harmonic    553.0 0.945 # O-H
+bond_coeff  3   harmonic    300.0 1.630 # Si-O
+bond_coeff  4   harmonic    340.0 1.090 # C-H
+bond_coeff  5   harmonic    268.0 1.529 # C-C
+bond_coeff  6   harmonic    200.0 1.850 # Si-C
+
+special_bonds lj/coul 0.0 0.0 0.5
+pair_modify shift yes mix geometric
+
+kspace_style pppm 1.0e-4
+kspace_modify slab 3.0
+
+# Group definitions
+group silica type 6 7 8 11 12 13 14 15 16
+
+group bottom id <= ${botatoms}
+group bottomsilica intersect bottom silica
+
+group asperity subtract all bottom
+
+variable subbottom equal bound(all,zmin)
+variable subfixmax equal ${subbottom}+4.0
+region subfixed block INF INF INF INF INF ${subfixmax}
+group subfixed region subfixed
+
+variable tiptop equal bound(asperity,zmax)
+variable topfixmax equal ${tiptop}-4.0
+region topfixed block INF INF INF INF ${topfixmax} INF
+group topfixed region topfixed
+group asperityfixed intersect topfixed asperity
+
+group fixed union subfixed asperity
+group mobile subtract all fixed
+
+# Define neighborlist params
+neighbor        4.0 bin
+neigh_modify    every 2 delay 0
+neigh_modify    exclude group asperity asperity
+neigh_modify    exclude group subfixed subfixed
+
+# Define parameters for RESPA multi-timestep integrator
+run_style respa 3 2 2 bond 1 angle 2 dihedral 2 pair 3 kspace 3
+
+# NVT integration with Nose-Hoover thermostat
+# Thermostatting not performed in the x-dimension (the direction of shear)
+compute cTyz mobile temp/partial 0 1 1
+fix integrator	mobile nvt temp ${temperature} ${temperature} 100
+fix_modify integrator temp cTyz
+
+# Fix OH bonds with SHAKE
+fix suboh bottom shake 0.0001 20 100 b 2
+
+timestep 1.0
+thermo 1000
+thermo_style custom step temp pe ke epair evdwl ecoul ebond eangle edihed
+
+dump traj	all dcd 1000 ${NAME}-${LOAD}nN.dcd
+dump_modify traj unwrap yes
+
+# Treat the tip as a rigid body and apply the desired normal load
+variable zforce equal ${LOAD}/0.0695
+velocity asperity zero angular
+velocity asperity zero linear
+fix rigidify asperity rigid single force 1 off off on torque 1 off off off
+variable Fn equal -${zforce}/count(asperity)
+fix nforce asperity addforce 0.0 0.0 ${Fn}
+
+# Write out friction and normal forces on various parts of the system
+compute 1 asperity property/atom fz
+compute 4 asperity reduce sum c_1
+compute 7 bottom property/atom fz
+compute 8 subfixed property/atom fz
+compute 9 bottomsilica property/atom fz
+compute 10 bottom reduce sum c_7
+compute 11 subfixed reduce sum c_8
+compute 12 bottomsilica reduce sum c_9
+variable asperityfz equal (c_4*0.0695)+${LOAD}
+# The 0.0695 factor converts to nN
+variable bottomfz equal c_10*0.0695
+variable subfixedfz equal c_11*0.0695
+variable bottomsilicafz equal c_12*0.0695
+
+fix fz_asperity asperity ave/time 500 1 500 v_asperityfz file ${NAME}-${LOAD}nN-fz-asperity.txt
+fix fz_bottom bottom ave/time 500 1 500 v_bottomfz file ${NAME}-${LOAD}nN-fz-bottom.txt
+fix fz_subfixed subfixed ave/time 500 1 500 v_subfixedfz file ${NAME}-${LOAD}nN-fz-subfixed.txt
+fix fz_bottomsilica bottomsilica ave/time 500 1 500 v_bottomsilicafz file ${NAME}-${LOAD}nN-fz-bottomsilica.txt
+
+compute 13 asperity property/atom fx
+compute 16 asperity reduce sum c_13
+compute 19 bottom property/atom fx
+compute 20 subfixed property/atom fx
+compute 21 bottomsilica property/atom fx
+compute 22 bottom reduce sum c_19
+compute 23 subfixed reduce sum c_20
+compute 24 bottomsilica reduce sum c_21
+variable asperityfx equal c_16*0.0695
+variable bottomfx equal c_22*0.0695
+variable subfixedfx equal c_23*0.0695
+variable bottomsilicafx equal c_24*0.0695
+
+fix fx_asperity asperity ave/time 500 1 500 v_asperityfx file ${NAME}-${LOAD}nN-fx-asperity.txt
+fix fx_bottom bottom ave/time 500 1 500 v_bottomfx file ${NAME}-${LOAD}nN-fx-bottom.txt
+fix fx_subfixed subfixed ave/time 500 1 500 v_subfixedfx file ${NAME}-${LOAD}nN-fx-subfixed.txt
+fix fx_bottomsilica bottomsilica ave/time 500 1 500 v_bottomsilicafx file ${NAME}-${LOAD}nN-fx-bottomsilica.txt
+
+# Write out the inter-surface separation every 0.5ps
+variable asperitylevel equal bound(asperity,zmin)
+group binding type 11 12
+group surface_binding intersect binding bottom
+compute sbcom surface_binding com
+variable sublevel equal c_sbcom[3]
+variable sep equal v_asperitylevel-v_sublevel
+fix sep_log all ave/time 500 1 500 v_sep file ${NAME}-${LOAD}nN-sep.txt
+
+# Move the bottom surface at 10m/s
+fix botmove subfixed move linear -1e-4 0.0 0.0 units box
+
+restart 250000 restart.${NAME}-${LOAD}nN.*.shear
+
+# Run for 1.5ns
+run 1500000
